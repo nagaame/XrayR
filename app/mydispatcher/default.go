@@ -409,17 +409,45 @@ func sniffer(ctx context.Context, cReader *cachedReader, metadataOnly bool, netw
 func (d *DefaultDispatcher) routedDispatch(ctx context.Context, link *transport.Link, destination net.Destination) {
 	outbounds := session.OutboundsFromContext(ctx)
 	ob := outbounds[len(outbounds)-1]
-	if hosts, ok := d.dns.(dns.HostsLookup); ok && destination.Address.Family().IsDomain() {
-		proxied := hosts.LookupHosts(ob.Target.String())
-		if proxied != nil {
-			ro := ob.RouteTarget == destination
-			destination.Address = *proxied
-			if ro {
-				ob.RouteTarget = destination
-			} else {
-				ob.Target = destination
-			}
+	if hosts, ok := d.dns.(dns.Client); ok && destination.Address.Family().IsDomain() {
+		// Define IP options, assuming we want to try resolving both IPv4 and IPv6.
+		// You might need to adjust these options based on your specific requirements or configuration.
+		ipOption := dns.IPOption{
+			IPv4Enable: true,
+			IPv6Enable: true,
 		}
+
+		// LookupIP expects a host string, not host:port. Use destination.Address.String().
+		ips, _, err := hosts.LookupIP(destination.Address.String(), ipOption)
+
+		if err == nil && len(ips) > 0 {
+			// Use the first IP address from the list.
+			selectedIP := ips[0]
+
+			// Create a new net.Address from the selected IP.
+			resolvedAddress := net.ParseAddress(selectedIP.String())
+
+			if resolvedAddress != nil {
+				// Store whether the original RouteTarget was the same as the destination being resolved.
+				ro := ob.RouteTarget == destination
+
+				// Update the destination's address with the resolved IP.
+				destination.Address = resolvedAddress
+
+				if ro {
+					// If RouteTarget was the original destination, update it to the new resolved destination.
+					ob.RouteTarget = destination
+				} else {
+					// Otherwise, update the Target to the new resolved destination.
+					ob.Target = destination
+				}
+			} else {
+				errors.LogWarning(ctx, "failed to parse resolved IP: ", selectedIP.String())
+			}
+		} else if err != nil {
+			errors.LogWarning(ctx, "DNS lookup failed for ", destination.Address.String(), ": ", err)
+		}
+		// If err is nil but len(ips) is 0, it means no IPs were found; no action needed in that case.
 	}
 
 	var handler outbound.Handler
